@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+import os
 
 def solve_ks_equation(N=1024, tmax=100, h=0.025, initial_condition=None):
     x = 32*np.pi*np.transpose(np.arange(1, N+1))/N
@@ -120,8 +121,17 @@ def plot_comparison(x, tt, exact_solution, predicted_solution, title):
     
     plt.suptitle(title)
     plt.tight_layout()
-    plt.savefig('ks_comparison.png')
+    
+    # Save with unique filename based on title
+    filename = f'ks_comparison_{title.lower().replace(" ", "_")}.png'
+    plt.savefig(filename)
     plt.close()
+    
+    # Also save the numerical data
+    np.save(f'ks_exact_{title.lower().replace(" ", "_")}.npy', exact_solution)
+    np.save(f'ks_predicted_{title.lower().replace(" ", "_")}.npy', predicted_solution)
+    
+    print(f"Saved comparison plot and data for: {title}")
 
 def main():
     # Generate initial solution
@@ -137,6 +147,11 @@ def main():
     plt.savefig('ks_original.png')
     plt.close()
     
+    # Save original solution data
+    np.save('ks_original_solution.npy', uu)
+    np.save('ks_original_x.npy', x)
+    np.save('ks_original_t.npy', tt)
+    
     # Create dataset and dataloader for training
     dataset = KSDataset(x, tt, uu)
     train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
@@ -148,12 +163,27 @@ def main():
     print("Training neural network...")
     train_model(model, train_loader)
     
+    # Save the trained model
+    torch.save(model.state_dict(), 'ks_model.pth')
+    
     # Generate predictions for different initial conditions
     initial_conditions = [
+        # Original conditions
         (np.cos(x/8)*(1+np.sin(x/8)), "Different frequency"),
         (np.sin(x/16), "Pure sine"),
-        (np.cos(x/16), "Pure cosine")
+        (np.cos(x/16), "Pure cosine"),
+        
+        # Additional test conditions
+        (np.sin(x/4), "Higher frequency sine"),
+        (np.cos(x/4), "Higher frequency cosine"),
+        (np.sin(x/8) + np.cos(x/8), "Combined sine and cosine"),
+        (np.exp(-x**2/100), "Gaussian"),
+        (np.tanh(x/8), "Tanh function"),
+        (np.sin(x/16) * np.exp(-x**2/200), "Damped sine wave")
     ]
+    
+    # Create a results directory if it doesn't exist
+    os.makedirs('ks_results', exist_ok=True)
     
     for init_cond, title in initial_conditions:
         # Generate exact solution
@@ -174,6 +204,9 @@ def main():
         
         # Plot comparison
         plot_comparison(x_test, tt_test, exact_solution, predicted_solution, title)
+        
+        # Save initial condition
+        np.save(f'ks_results/initial_condition_{title.lower().replace(" ", "_")}.npy', init_cond)
 
 if __name__ == "__main__":
     main()
