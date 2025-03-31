@@ -1,219 +1,179 @@
 import numpy as np
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.pyplot as plt
+from matplotlib import cm
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-import os
 
-# Check for GPU availability
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {device}")
+def solve_ks_equation(N=1024, tmax=100, h=0.025, initial_condition=None):
+    x = 32*np.pi*np.transpose(np.arange(1, N+1))/N
+    if initial_condition is None:
+        u = np.cos(x/16)*(1+np.sin(x/16))
+    else:
+        u = initial_condition
+    v = np.fft.fft(u)
+    
+    h = 0.025
+    k = np.transpose(np.conj(np.concatenate((np.arange(0, N/2), np.array([0]), np.arange(-N/2+1, 0))))) / 16
+    L = np.power(k,2) - np.power(k,4)
+    E = np.exp(h*L)
+    E2 = np.exp(h*L/2)
+    M = 16
+    r = np.exp(1j*np.pi*(np.arange(1, M+1)-0.5) / M)
+    LR = h*np.transpose(np.repeat([L], M, axis=0)) + np.repeat([r], N, axis=0)
+    Q = h*np.real(np.mean((np.exp(LR/2)-1)/LR, axis=1))
+    f1 = h*np.real(np.mean((-4-LR+np.exp(LR)*(4-3*LR+LR**2))/LR**3, axis=1))
+    f2 = h*np.real(np.mean((2+LR+np.exp(LR)*(-2+LR))/LR**3, axis=1))
+    f3 = h*np.real(np.mean((-4-3*LR-LR**2+np.exp(LR)*(4-LR))/LR**3, axis=1))
+    
+    uu = np.array([u])
+    tt = 0
+    nmax = round(tmax/h)
+    nplot = int((tmax/250)/h)
+    g = -0.5*k
+    
+    for n in range(1,nmax+1):
+        t = n*h
+        Nv = g*np.fft.fft(np.real(np.power(np.fft.ifft(v),2)))
+        a = E2*v+Q*Nv
+        Na = g*np.fft.fft(np.real(np.power(np.fft.ifft(a),2)))
+        b = E2*v +Q*Na
+        Nb = g*np.fft.fft(np.real(np.power(np.fft.ifft(b),2)))
+        c = E2*a+Q*(2*Nb-Nv)
+        Nc = g*np.fft.fft(np.real(np.power(np.fft.ifft(c),2)))
+        v = E*v + Nv*f1+2*(Na+Nb)*f2+Nc*f3
+        if n%nplot == 0:
+            u = np.real(np.fft.ifft(v))
+            uu = np.append(uu, np.array([u]), axis=0)
+            tt = np.hstack((tt, t))
+    
+    return x, tt, uu
 
 class KSDataset(Dataset):
-    def __init__(self, t, x, u):
-        # Normalize the data
-        self.u_mean = np.mean(u)
-        self.u_std = np.std(u)
-        u_normalized = (u - self.u_mean) / (self.u_std + 1e-8)
-        
-        self.t = torch.FloatTensor(t)
+    def __init__(self, x, tt, uu):
         self.x = torch.FloatTensor(x)
-        self.u = torch.FloatTensor(u_normalized)
+        self.tt = torch.FloatTensor(tt)
+        self.uu = torch.FloatTensor(uu)
         
     def __len__(self):
-        return len(self.t) - 1
+        return self.uu.shape[0] - 1
         
     def __getitem__(self, idx):
-        # Return current state and next state
-        current = self.u[idx]
-        next_state = self.u[idx + 1]
-        return current, next_state
-    
-    def denormalize(self, u_normalized):
-        return u_normalized * (self.u_std + 1e-8) + self.u_mean
+        if idx >= len(self):
+            raise IndexError(f"Index {idx} out of bounds")
+        return self.uu[idx], self.uu[idx + 1]
 
 class KSNetwork(nn.Module):
     def __init__(self, input_size):
         super(KSNetwork, self).__init__()
         self.net = nn.Sequential(
-            nn.Linear(input_size, 64),
-            nn.Tanh(),
-            nn.Linear(64, 64),
-            nn.Tanh(),
-            nn.Linear(64, input_size)
+            nn.Linear(input_size, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, input_size)
         )
-        
-        # Initialize weights with small values
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight, gain=0.1)
-                nn.init.zeros_(m.bias)
         
     def forward(self, x):
         return self.net(x)
 
-def solve_ks(t, x, u0, dt, dx):
-    """Solve KS equation using upwind scheme for stability"""
-    N = len(x)
-    u = np.zeros((len(t), N))
-    u[0] = u0
-    
-    # Add padding for periodic boundary conditions
-    def pad_periodic(arr):
-        return np.pad(arr, 2, mode='wrap')
-    
-    # Compute derivatives with upwind scheme
-    def derivatives(u):
-        u_pad = pad_periodic(u)
-        
-        # First derivative (upwind)
-        ux = np.zeros_like(u)
-        ux[u > 0] = (u_pad[2:-2][u > 0] - u_pad[1:-3][u > 0]) / dx
-        ux[u <= 0] = (u_pad[3:-1][u <= 0] - u_pad[2:-2][u <= 0]) / dx
-        
-        # Second derivative (central)
-        uxx = (u_pad[3:-1] - 2*u_pad[2:-2] + u_pad[1:-3]) / (dx*dx)
-        
-        # Fourth derivative (central with artificial dissipation)
-        uxxxx = (u_pad[4:] - 4*u_pad[3:-1] + 6*u_pad[2:-2] - 
-                4*u_pad[1:-3] + u_pad[0:-4]) / (dx**4)
-        uxxxx += 1e-4 * (np.roll(u, 1) - 2*u + np.roll(u, -1)) / (dx*dx)
-        
-        return ux, uxx, uxxxx
-    
-    # Time stepping with adaptive timestep
-    dt_base = dt
-    for n in range(len(t)-1):
-        # Compute local CFL number and adjust timestep
-        max_speed = np.max(np.abs(u[n]))
-        dt = min(dt_base, 0.5 * dx / (max_speed + 1e-8))
-        
-        # RK2 time stepping
-        ux, uxx, uxxxx = derivatives(u[n])
-        k1 = -u[n]*ux - uxx - uxxxx
-        
-        u_mid = u[n] + 0.5*dt*k1
-        ux, uxx, uxxxx = derivatives(u_mid)
-        k2 = -u_mid*ux - uxx - uxxxx
-        
-        u[n+1] = u[n] + dt*k2
-        
-        # Add small amount of filtering
-        u[n+1] = 0.99*u[n+1] + 0.01*(np.roll(u[n+1], 1) + np.roll(u[n+1], -1))/2
-    
-    return u
-
-def generate_data(t, x, u0, dt, dx):
-    u = solve_ks(t, x, u0, dt, dx)
-    return t, x, u
-
-def train_model(model, train_loader, num_epochs, learning_rate):
+def train_model(model, train_loader, num_epochs=100, learning_rate=0.001):
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-6)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
-    best_loss = float('inf')
     for epoch in range(num_epochs):
         total_loss = 0
         for batch_idx, (current, target) in enumerate(train_loader):
-            current = current.to(device)
-            target = target.to(device)
-            
             optimizer.zero_grad()
             output = model(current)
             loss = criterion(output, target)
             loss.backward()
-            
-            # Gradient clipping for stability
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
-            
             optimizer.step()
             total_loss += loss.item()
         
-        avg_loss = total_loss / len(train_loader)
-        scheduler.step(avg_loss)
-        
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            torch.save({
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': best_loss,
-            }, 'best_ks_model.pth')
-            
         if (epoch + 1) % 10 == 0:
-            print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.6f}')
+            print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {total_loss/len(train_loader):.6f}')
+
+def plot_comparison(x, tt, exact_solution, predicted_solution, title):
+    fig = plt.figure(figsize=(15, 5))
+    
+    # Exact solution
+    ax1 = fig.add_subplot(121, projection='3d')
+    tt, x = np.meshgrid(tt, x)
+    surf1 = ax1.plot_surface(tt, x, exact_solution.transpose(), cmap=cm.hot)
+    ax1.set_title('Exact Solution')
+    ax1.set_xlabel('Time')
+    ax1.set_ylabel('Space')
+    ax1.set_zlabel('u(x,t)')
+    
+    # Neural network prediction
+    ax2 = fig.add_subplot(122, projection='3d')
+    surf2 = ax2.plot_surface(tt, x, predicted_solution.transpose(), cmap=cm.hot)
+    ax2.set_title('Neural Network Prediction')
+    ax2.set_xlabel('Time')
+    ax2.set_ylabel('Space')
+    ax2.set_zlabel('u(x,t)')
+    
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.savefig('ks_comparison.png')
+    plt.close()
 
 def main():
-    # Parameters
-    L = 32
-    N = 64  # Further reduced spatial resolution for stability
-    dt = 0.1
-    t = np.arange(0, 20, dt)  # Reduced time span for stability
-    dx = L/N
-    x = np.arange(0, L, dx)
+    # Generate initial solution
+    x, tt, uu = solve_ks_equation()
     
-    # Initial condition (very simple for stability)
-    u0 = 0.1*np.sin(2*np.pi*x/L)
+    # Plot original solution
+    fig = plt.figure()
+    ax = fig.add_subplot(projection='3d')
+    tt_mesh, x_mesh = np.meshgrid(tt, x)
+    surf = ax.plot_surface(tt_mesh, x_mesh, uu.transpose(), cmap=cm.hot, linewidth=0, antialiased=False)
+    fig.colorbar(surf, shrink=0.5, aspect=5)
+    plt.title('Original KS Solution')
+    plt.savefig('ks_original.png')
+    plt.close()
     
-    # Generate data
-    t, x, u = generate_data(t, x, u0, dt, dx)
-    
-    # Create dataset and dataloader
-    dataset = KSDataset(t, x, u)
+    # Create dataset and dataloader for training
+    dataset = KSDataset(x, tt, uu)
     train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
     
     # Initialize model
-    model = KSNetwork(input_size=N).to(device)
+    model = KSNetwork(input_size=len(x))
     
     # Train model
-    train_model(model, train_loader, num_epochs=100, learning_rate=0.001)
+    print("Training neural network...")
+    train_model(model, train_loader)
     
-    # Load best model
-    checkpoint = torch.load('best_ks_model.pth')
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Generate predictions for different initial conditions
+    initial_conditions = [
+        (np.cos(x/8)*(1+np.sin(x/8)), "Different frequency"),
+        (np.sin(x/16), "Pure sine"),
+        (np.cos(x/16), "Pure cosine")
+    ]
     
-    # Make predictions
-    model.eval()
-    with torch.no_grad():
-        predictions = []
-        current_state = torch.FloatTensor(dataset.u[0]).unsqueeze(0).to(device)
+    for init_cond, title in initial_conditions:
+        # Generate exact solution
+        x_test, tt_test, exact_solution = solve_ks_equation(initial_condition=init_cond)
         
-        for _ in range(len(t)):
-            next_state = model(current_state)
-            predictions.append(next_state.cpu().numpy()[0])
-            current_state = next_state
+        # Generate neural network predictions
+        model.eval()
+        with torch.no_grad():
+            predicted_solution = []
+            current = torch.FloatTensor(init_cond).unsqueeze(0)
+            
+            for _ in range(len(tt_test)):
+                next_state = model(current)
+                predicted_solution.append(next_state.numpy()[0])
+                current = next_state
+            
+            predicted_solution = np.array(predicted_solution)
         
-        predictions = np.array(predictions)
-        
-        # Denormalize predictions
-        predictions = dataset.denormalize(predictions)
-    
-    # Plot results
-    fig = plt.figure(figsize=(15, 5))
-    
-    # Original solution
-    ax1 = fig.add_subplot(121, projection='3d')
-    tt, xx = np.meshgrid(t, x)
-    surf1 = ax1.plot_surface(tt, xx, u.T, cmap='viridis')
-    ax1.set_title('Original KS Solution')
-    ax1.set_xlabel('t')
-    ax1.set_ylabel('x')
-    ax1.set_zlabel('u')
-    
-    # Neural network predictions
-    ax2 = fig.add_subplot(122, projection='3d')
-    surf2 = ax2.plot_surface(tt, xx, predictions.T, cmap='viridis')
-    ax2.set_title('Neural Network Predictions')
-    ax2.set_xlabel('t')
-    ax2.set_ylabel('x')
-    ax2.set_zlabel('u')
-    
-    plt.tight_layout()
-    plt.savefig('ks_neural_net_prediction.png')
-    plt.close()
+        # Plot comparison
+        plot_comparison(x_test, tt_test, exact_solution, predicted_solution, title)
 
 if __name__ == "__main__":
     main()
