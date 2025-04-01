@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 from scipy.linalg import svd, pinv
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+import matplotlib as mpl
 
 # Load data
 X1 = pd.read_csv('hw2-DMD-X0.csv', header=None)
@@ -193,4 +195,145 @@ Thus, r = 12 provides a good balance between model complexity and accuracy for t
 
 print(f"Analysis complete. The optimal rank based on reconstruction error is approximately {optimal_rank}.")
 print(f"Created plots for rank selection, dynamic modes, eigenvalues, and reconstruction error.")
+
+# -------------------- FORECASTING WITH DMD --------------------
+print("\n--- Starting Forecasting with DMD ---")
+
+# Use the optimal rank for forecasting
+r = optimal_rank
+print(f"Using optimal rank r = {r} for forecasting")
+
+# We've already computed the necessary components for the optimal rank above:
+# - Phi_opt: DMD modes
+# - eigvals_opt: DMD eigenvalues
+
+# Compute the initial amplitudes by projecting X1 onto the DMD modes
+b = np.linalg.pinv(Phi_opt) @ X1[:, 0]
+
+# Define the time steps for forecasting
+# Let's assume we have a unit time step between X1 and X2
+dt = 1.0  
+future_steps = 20  # Increase number of future time steps for better visualization
+forecast_times = np.arange(0, future_steps + 1) * dt
+
+# Create a container for the forecasted states
+forecasts = np.zeros((X1.shape[0], len(forecast_times)), dtype=complex)
+
+# Compute the forecasted states
+for i, t in enumerate(forecast_times):
+    # The DMD solution: x(t) = Phi * exp(omega*t) * b
+    # where omega = log(lambda)/dt
+    dynamics = np.exp(np.log(eigvals_opt) * t/dt)
+    forecasts[:, i] = Phi_opt @ (dynamics * b)
+
+# Plot the forecasted states at different time steps
+plt.figure(figsize=(15, 10))
+num_plots = min(6, future_steps + 1)  # Show at most 6 time steps
+for i in range(num_plots):
+    t_idx = i * (future_steps // (num_plots - 1)) if i < num_plots - 1 else future_steps
+    plt.subplot(2, 3, i+1)
+    plt.plot(np.abs(forecasts[:, t_idx]))
+    plt.title(f'Forecast at t = {forecast_times[t_idx]:.1f}')
+    plt.xlabel('Space')
+    plt.ylabel('Amplitude')
+    plt.grid(True)
+plt.tight_layout()
+plt.savefig('dmd_forecasts.png')
+plt.close()
+
+# Create a space-time heatmap of the forecasted evolution
+plt.figure(figsize=(12, 8))
+plt.imshow(np.abs(forecasts), aspect='auto', interpolation='none', 
+           extent=[0, forecast_times[-1], 0, X1.shape[0]-1], 
+           origin='lower', cmap='viridis')
+plt.colorbar(label='Amplitude')
+plt.xlabel('Time')
+plt.ylabel('Space')
+plt.title('DMD Forecast: Spatiotemporal Evolution')
+plt.savefig('dmd_forecast_heatmap.png')
+plt.close()
+
+# Compare actual vs. forecasted for the first time step (X2 should be at t=1)
+plt.figure(figsize=(12, 6))
+plt.subplot(1, 2, 1)
+plt.plot(np.abs(X2[:, 0]), label='Actual')
+plt.plot(np.abs(forecasts[:, 1]), '--', label='DMD Forecast')
+plt.title('Comparison at t=1')
+plt.xlabel('Space')
+plt.ylabel('Amplitude')
+plt.legend()
+plt.grid(True)
+
+# Calculate and display forecast error
+forecast_error = np.linalg.norm(X2[:, 0] - forecasts[:, 1]) / np.linalg.norm(X2[:, 0])
+plt.subplot(1, 2, 2)
+plt.bar(['Forecast Error'], [forecast_error])
+plt.ylabel('Relative Error')
+plt.title(f'DMD Forecast Error: {forecast_error:.4f}')
+plt.tight_layout()
+plt.savefig('dmd_forecast_validation.png')
+plt.close()
+
+# Create an animation of the forecasted system evolution
+print("Creating animation of the forecasted system evolution...")
+
+# Set up the figure and axis for animation
+fig, ax = plt.subplots(figsize=(10, 6))
+line, = ax.plot([], [], 'b-', lw=2)
+ax.grid(True)
+ax.set_xlabel('Space')
+ax.set_ylabel('Amplitude')
+ax.set_title('DMD Forecast: System Evolution')
+
+# Set the y-axis limits based on the maximum amplitude across all forecasts
+max_amplitude = np.max(np.abs(forecasts))
+ax.set_ylim(0, max_amplitude * 1.1)
+ax.set_xlim(0, X1.shape[0] - 1)
+
+# Initialization function for the animation
+def init():
+    line.set_data([], [])
+    return line,
+
+# Animation function
+def animate(i):
+    x = np.arange(X1.shape[0])
+    y = np.abs(forecasts[:, i])
+    line.set_data(x, y)
+    ax.set_title(f'DMD Forecast: t = {forecast_times[i]:.1f}')
+    return line,
+
+# Create the animation
+# Note: we're saving 30 frames to keep the file size reasonable
+num_frames = min(30, len(forecast_times))
+sample_indices = np.linspace(0, len(forecast_times)-1, num_frames, dtype=int)
+ani = FuncAnimation(fig, animate, frames=sample_indices, init_func=init, 
+                    blit=True, interval=200)
+
+# Save the animation
+ani.save('dmd_forecast_animation.gif', writer='pillow', fps=5, dpi=100)
+plt.close()
+
+# Examine the growth/decay rates of the DMD modes
+growth_rates = np.abs(eigvals_opt)
+frequencies = np.angle(eigvals_opt) / (2 * np.pi * dt)
+
+# Plot the growth/decay rates versus frequencies
+plt.figure(figsize=(10, 6))
+plt.scatter(frequencies, growth_rates, c=np.arange(len(eigvals_opt)), 
+            cmap='viridis', s=100, alpha=0.8)
+plt.colorbar(label='Mode index')
+plt.axhline(y=1.0, color='r', linestyle='--', label='Neutral stability')
+plt.grid(True)
+plt.xlabel('Frequency (cycles/time unit)')
+plt.ylabel('Growth Rate')
+plt.title('DMD Mode Stability Analysis')
+plt.legend()
+plt.tight_layout()
+plt.savefig('dmd_mode_stability.png')
+plt.close()
+
+print(f"Forecasting complete. Relative forecast error at t=1: {forecast_error:.4f}")
+print("Created forecast visualizations and animation.")
+print("Additional stability analysis of the DMD modes created.")
 
