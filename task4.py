@@ -1,83 +1,86 @@
 import numpy as np
-from scipy import linalg
-
-def check_controllability(A, B):
-    """Check if the system is controllable using Kalman's controllability test."""
-    n = A.shape[0]
-    C = np.hstack([np.linalg.matrix_power(A, i) @ B for i in range(n)])
-    rank = np.linalg.matrix_rank(C)
-    return rank == n
-
-def check_observability(A, C):
-    """Check if the system is observable using Kalman's observability test."""
-    n = A.shape[0]
-    O = np.vstack([C @ np.linalg.matrix_power(A, i) for i in range(n)])
-    rank = np.linalg.matrix_rank(O)
-    return rank == n
-
-def place_poles(A, B, desired_poles):
-    """Place poles using Ackermann's formula."""
-    n = A.shape[0]
-    
-    # Compute controllability matrix
-    C = np.hstack([np.linalg.matrix_power(A, i) @ B for i in range(n)])
-    
-    # Compute characteristic polynomial coefficients
-    char_poly = np.poly(desired_poles)
-    
-    # Compute Ackermann's formula
-    K = np.zeros((1, n))
-    for i in range(n):
-        K += char_poly[i] * np.linalg.matrix_power(A, n-1-i)
-    
-    # Compute feedback gain
-    K = K @ np.linalg.inv(C)
-    return K
+import control as ctrl
+import matplotlib.pyplot as plt
 
 def main():
-    # Task 4.1: Check controllability and observability
-    print("Task 4.1: Controllability and Observability Analysis")
-    print("-" * 50)
+    # Problem 1: Determine controllability and observability
+    print("Problem 1: System Controllability and Observability Analysis")
     
-    # System matrices
+    # Define system matrices
     A = np.array([[0, 1, 0],
                   [0, 1, 1],
                   [-1, -2, -3]])
+    
     B = np.array([[1],
                   [0],
                   [0]])
+    
     C = np.array([[1, 0, 1]])
     
+    D = np.array([[1]])
+    
+    # Create state-space system
+    sys = ctrl.StateSpace(A, B, C, D)
+    
     # Check controllability
-    is_controllable = check_controllability(A, B)
-    print(f"System is {'controllable' if is_controllable else 'not controllable'}")
+    Co = ctrl.ctrb(A, B)
+    rank_Co = np.linalg.matrix_rank(Co)
+    n = A.shape[0]  # System order
+    
+    print(f"Controllability matrix:\n{Co}")
+    print(f"Rank of controllability matrix: {rank_Co}")
+    print(f"System order: {n}")
+    print(f"Is the system controllable? {rank_Co == n}")
     
     # Check observability
-    is_observable = check_observability(A, C)
-    print(f"System is {'observable' if is_observable else 'not observable'}")
+    Ob = ctrl.obsv(A, C)
+    rank_Ob = np.linalg.matrix_rank(Ob)
     
-    # Task 4.2: Design stabilizing controller
-    print("\nTask 4.2: Stabilizing Controller Design")
-    print("-" * 50)
+    print(f"\nObservability matrix:\n{Ob}")
+    print(f"Rank of observability matrix: {rank_Ob}")
+    print(f"Is the system observable? {rank_Ob == n}")
     
-    # System matrices for the second system
+    # Problem 2: Find stabilizing feedback control
+    print("\nProblem 2: Stabilizing Feedback Control Design")
+    
+    # Define system matrices
     A2 = np.array([[1, 1],
                    [1, 2]])
+    
     B2 = np.array([[1],
                    [0]])
     
-    # Design controller
-    desired_poles = [-1, -2]
-    K = place_poles(A2, B2, desired_poles)
-    print("Feedback gain matrix K:")
-    print(K)
+    # Check system eigenvalues (before control)
+    eig_A2 = np.linalg.eigvals(A2)
+    print(f"Original system eigenvalues: {eig_A2}")
+    print(f"Is the original system stable? {np.all(np.real(eig_A2) < 0)}")
     
-    # Verify stability
-    A_closed = A2 - B2 @ K
-    eigenvalues = np.linalg.eigvals(A_closed)
-    print("\nClosed-loop eigenvalues:")
-    print(eigenvalues)
-    print(f"System is {'stable' if all(np.real(eigenvalues) < 0) else 'unstable'}")
+    # Check controllability
+    Co2 = ctrl.ctrb(A2, B2)
+    rank_Co2 = np.linalg.matrix_rank(Co2)
+    n2 = A2.shape[0]
+    
+    print(f"Controllability matrix:\n{Co2}")
+    print(f"Rank of controllability matrix: {rank_Co2}")
+    print(f"Is the system controllable? {rank_Co2 == n2}")
+    
+    if rank_Co2 == n2:
+        # Choose desired eigenvalues in the left half-plane
+        desired_eigs = [-1, -2]  # Example stable poles
+        
+        # Compute feedback gain K using pole placement
+        K = ctrl.place(A2, B2, desired_eigs)
+        
+        print(f"\nFeedback gain K = {K}")
+        
+        # Verify closed-loop system stability
+        A_cl = A2 - B2 @ K
+        eig_cl = np.linalg.eigvals(A_cl)
+        
+        print(f"Closed-loop eigenvalues: {eig_cl}")
+        print(f"Is the closed-loop system stable? {np.all(np.real(eig_cl) < 0)}")
+    else:
+        print("System is not controllable, cannot place poles arbitrarily.")
 
 if __name__ == "__main__":
-    main() 
+    main()
