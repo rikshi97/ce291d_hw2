@@ -1,22 +1,42 @@
 import numpy as np
-from mpl_toolkits.mplot3d import Axes3D
-import matplotlib.pyplot as plt
-from matplotlib import cm
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-import os
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.pyplot as plt
+from matplotlib import cm
 
-def solve_ks_equation(N=1024, tmax=100, h=0.025, initial_condition=None):
+# Set random seed for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
+
+# Define the neural network
+class KSNetwork(nn.Module):
+    def __init__(self):
+        super(KSNetwork, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(2, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)
+        )
+    
+    def forward(self, x):
+        return self.network(x)
+
+# Function to generate exact solution (from the original code)
+def generate_exact_solution(N=1024, tmax=100, h=0.025):
+    # Initial condition
     x = 32*np.pi*np.transpose(np.arange(1, N+1))/N
-    if initial_condition is None:
-        u = np.cos(x/16)*(1+np.sin(x/16))
-    else:
-        u = initial_condition
+    u = np.cos(x/16)*(1+np.sin(x/16))
     v = np.fft.fft(u)
     
-    h = 0.025
+    # Numerical grid
     k = np.transpose(np.conj(np.concatenate((np.arange(0, N/2), np.array([0]), np.arange(-N/2+1, 0))))) / 16
     L = np.power(k,2) - np.power(k,4)
     E = np.exp(h*L)
@@ -29,13 +49,14 @@ def solve_ks_equation(N=1024, tmax=100, h=0.025, initial_condition=None):
     f2 = h*np.real(np.mean((2+LR+np.exp(LR)*(-2+LR))/LR**3, axis=1))
     f3 = h*np.real(np.mean((-4-3*LR-LR**2+np.exp(LR)*(4-LR))/LR**3, axis=1))
     
+    # Time stepping
     uu = np.array([u])
     tt = 0
     nmax = round(tmax/h)
     nplot = int((tmax/250)/h)
     g = -0.5*k
     
-    for n in range(1,nmax+1):
+    for n in range(1, nmax+1):
         t = n*h
         Nv = g*np.fft.fft(np.real(np.power(np.fft.ifft(v),2)))
         a = E2*v+Q*Nv
@@ -52,161 +73,83 @@ def solve_ks_equation(N=1024, tmax=100, h=0.025, initial_condition=None):
     
     return x, tt, uu
 
-class KSDataset(Dataset):
-    def __init__(self, x, tt, uu):
-        self.x = torch.FloatTensor(x)
-        self.tt = torch.FloatTensor(tt)
-        self.uu = torch.FloatTensor(uu)
-        
-    def __len__(self):
-        return self.uu.shape[0] - 1
-        
-    def __getitem__(self, idx):
-        if idx >= len(self):
-            raise IndexError(f"Index {idx} out of bounds")
-        return self.uu[idx], self.uu[idx + 1]
+# Generate training data
+N = 1024
+x, tt, uu_exact = generate_exact_solution(N=N)
 
-class KSNetwork(nn.Module):
-    def __init__(self, input_size):
-        super(KSNetwork, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_size, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, input_size)
-        )
-        
-    def forward(self, x):
-        return self.net(x)
+# Create a grid of x and tt
+x_grid, tt_grid = np.meshgrid(x, tt)
+X = np.column_stack((x_grid.flatten(), tt_grid.flatten()))
+y = uu_exact.flatten()
 
-def train_model(model, train_loader, num_epochs=100, learning_rate=0.001):
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    
-    for epoch in range(num_epochs):
-        total_loss = 0
-        for batch_idx, (current, target) in enumerate(train_loader):
-            optimizer.zero_grad()
-            output = model(current)
-            loss = criterion(output, target)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        
-        if (epoch + 1) % 10 == 0:
-            print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {total_loss/len(train_loader):.6f}')
+# Normalize the data
+X_mean = np.mean(X, axis=0)
+X_std = np.std(X, axis=0)
+X = (X - X_mean) / X_std
 
-def plot_comparison(x, tt, exact_solution, predicted_solution, title):
-    fig = plt.figure(figsize=(15, 5))
-    
-    # Exact solution
-    ax1 = fig.add_subplot(121, projection='3d')
-    tt, x = np.meshgrid(tt, x)
-    surf1 = ax1.plot_surface(tt, x, exact_solution.transpose(), cmap=cm.hot)
-    ax1.set_title('Exact Solution')
-    ax1.set_xlabel('Time')
-    ax1.set_ylabel('Space')
-    ax1.set_zlabel('u(x,t)')
-    
-    # Neural network prediction
-    ax2 = fig.add_subplot(122, projection='3d')
-    surf2 = ax2.plot_surface(tt, x, predicted_solution.transpose(), cmap=cm.hot)
-    ax2.set_title('Neural Network Prediction')
-    ax2.set_xlabel('Time')
-    ax2.set_ylabel('Space')
-    ax2.set_zlabel('u(x,t)')
-    
-    plt.suptitle(title)
-    plt.tight_layout()
-    
-    # Save with unique filename based on title
-    filename = f'ks_comparison_{title.lower().replace(" ", "_")}.png'
-    plt.savefig(filename)
-    plt.close()
-    
-    # Also save the numerical data
-    np.save(f'ks_exact_{title.lower().replace(" ", "_")}.npy', exact_solution)
-    np.save(f'ks_predicted_{title.lower().replace(" ", "_")}.npy', predicted_solution)
-    
-    print(f"Saved comparison plot and data for: {title}")
+y_mean = np.mean(y)
+y_std = np.std(y)
+y = (y - y_mean) / y_std
 
-def main():
-    # Generate initial solution
-    x, tt, uu = solve_ks_equation()
-    
-    # Plot original solution
-    fig = plt.figure()
-    ax = fig.add_subplot(projection='3d')
-    tt_mesh, x_mesh = np.meshgrid(tt, x)
-    surf = ax.plot_surface(tt_mesh, x_mesh, uu.transpose(), cmap=cm.hot, linewidth=0, antialiased=False)
-    fig.colorbar(surf, shrink=0.5, aspect=5)
-    plt.title('Original KS Solution')
-    plt.savefig('ks_original.png')
-    plt.close()
-    
-    # Save original solution data
-    np.save('ks_original_solution.npy', uu)
-    np.save('ks_original_x.npy', x)
-    np.save('ks_original_t.npy', tt)
-    
-    # Create dataset and dataloader for training
-    dataset = KSDataset(x, tt, uu)
-    train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
-    
-    # Initialize model
-    model = KSNetwork(input_size=len(x))
-    
-    # Train model
-    print("Training neural network...")
-    train_model(model, train_loader)
-    
-    # Save the trained model
-    torch.save(model.state_dict(), 'ks_model.pth')
-    
-    # Generate predictions for different initial conditions
-    initial_conditions = [
-        # Original conditions
-        (np.cos(x/8)*(1+np.sin(x/8)), "Different frequency"),
-        (np.sin(x/16), "Pure sine"),
-        (np.cos(x/16), "Pure cosine"),
-        
-        # Additional test conditions
-        (np.sin(x/4), "Higher frequency sine"),
-        (np.cos(x/4), "Higher frequency cosine"),
-        (np.sin(x/8) + np.cos(x/8), "Combined sine and cosine"),
-        (np.exp(-x**2/100), "Gaussian"),
-        (np.tanh(x/8), "Tanh function"),
-        (np.sin(x/16) * np.exp(-x**2/200), "Damped sine wave")
-    ]
-    
-    # Create a results directory if it doesn't exist
-    os.makedirs('ks_results', exist_ok=True)
-    
-    for init_cond, title in initial_conditions:
-        # Generate exact solution
-        x_test, tt_test, exact_solution = solve_ks_equation(initial_condition=init_cond)
-        
-        # Generate neural network predictions
-        model.eval()
-        with torch.no_grad():
-            predicted_solution = []
-            current = torch.FloatTensor(init_cond).unsqueeze(0)
-            
-            for _ in range(len(tt_test)):
-                next_state = model(current)
-                predicted_solution.append(next_state.numpy()[0])
-                current = next_state
-            
-            predicted_solution = np.array(predicted_solution)
-        
-        # Plot comparison
-        plot_comparison(x_test, tt_test, exact_solution, predicted_solution, title)
-        
-        # Save initial condition
-        np.save(f'ks_results/initial_condition_{title.lower().replace(" ", "_")}.npy', init_cond)
+# Convert to PyTorch tensors
+X = torch.FloatTensor(X)
+y = torch.FloatTensor(y).reshape(-1, 1)  # Reshape to (N, 1)
 
-if __name__ == "__main__":
-    main()
+# Create and train the model
+model = KSNetwork()
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+# Training loop
+num_epochs = 2000  # Increased epochs
+batch_size = 128   # Increased batch size
+for epoch in range(num_epochs):
+    # Generate random batch indices
+    indices = torch.randperm(len(X))[:batch_size]
+    X_batch = X[indices]
+    y_batch = y[indices]
+    
+    # Forward pass
+    outputs = model(X_batch)
+    loss = criterion(outputs, y_batch)
+    
+    # Backward pass and optimize
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    
+    if (epoch + 1) % 100 == 0:
+        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+
+# Generate predictions
+model.eval()
+with torch.no_grad():
+    X_pred = torch.FloatTensor(X)  # Use the already normalized X
+    y_pred = model(X_pred).numpy()
+    y_pred = y_pred * y_std + y_mean  # Denormalize
+    y_pred = y_pred.reshape(uu_exact.shape)
+
+# Plot comparison
+fig = plt.figure(figsize=(15, 5))
+
+# Plot exact solution
+ax1 = fig.add_subplot(121, projection='3d')
+x_mesh, tt_mesh = np.meshgrid(x, tt)
+surf1 = ax1.plot_surface(x_mesh, tt_mesh, uu_exact, cmap=cm.hot, linewidth=0, antialiased=False)
+ax1.set_title('Exact Solution')
+fig.colorbar(surf1, shrink=0.5, aspect=5)
+
+# Plot neural network prediction
+ax2 = fig.add_subplot(122, projection='3d')
+surf2 = ax2.plot_surface(x_mesh, tt_mesh, y_pred, cmap=cm.hot, linewidth=0, antialiased=False)
+ax2.set_title('Neural Network Prediction')
+fig.colorbar(surf2, shrink=0.5, aspect=5)
+
+plt.tight_layout()
+# Save the plots
+plt.savefig('ks_comparison.png')
+# plt.show()  # Comment out the display line
+
+# Calculate and print error
+error = np.mean(np.abs(uu_exact - y_pred))
+print(f'Average absolute error: {error:.4f}')
